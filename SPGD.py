@@ -26,6 +26,9 @@ class SubPopulation:
     
     def plot_mus(self):
         plt.plot(self.mus)
+        plt.title('Actual Means')
+        plt.xlabel('Timestep')
+        plt.ylabel('Mean')
         plt.show()
 
 class MeanWorld:
@@ -80,12 +83,12 @@ class StatefulPerfGD:
             mu_hats.append(self.mu_hats[t])
         psi_H = np.stack(psis)
         mu_hats = np.stack(mu_hats)
-        grad_psi = psi_H - psi          # subtract psi from each prev timestep psi
-        grad_mu_hat = mu_hats - mu_hat
-        adj = (grad_psi.T @ grad_mu_hat).conj().T
-        # extract estimates of first and second order derivative of m
-        half = adj.shape[1] // 2
-        d1, d2 = adj[:,:half], adj[:,half:]
+        dpsi = psi_H - psi         # subtract psi from each prev timestep psi
+        dmu_hat = mu_hats - mu_hat
+        adj = np.conj(dpsi).T @ dmu_hat
+        # extract estimates of deriv of m wrt first and second inputs (theta, mu)
+        half = adj.shape[0] // 2
+        d1, d2 = adj[:half], adj[half:]
         return d1, d2
 
     def estimateLTJac(self, d1, d2):
@@ -105,13 +108,13 @@ class StatefulPerfGD:
         pdfs = []
         grad_add = (mu_hat - samples)
         for dim in range(samples.shape[1]):
-            pdf = norm.pdf(samples[dim], loc=mu_hat[dim], scale=1.0)
+            pdf = norm.pdf(samples[:,dim], loc=mu_hat[dim], scale=1.0)
             pdfs.append(pdf)
-        pdfs = np.stack(pdfs)
+        pdfs = np.stack(pdfs).T
         gpdfs = pdfs * grad_add
         loss = self.loss(y_true, y_pred)
 
-        ltgrad = np.sum(gloss * pdfs + loss * dmu_star * gpdfs)
+        ltgrad = np.sum(gloss[:,np.newaxis] * pdfs.T + loss * dmu_star @ gpdfs.T, axis=1)
         return ltgrad, loss
 
     def spgd(self, lr, max_steps):
@@ -127,19 +130,24 @@ class StatefulPerfGD:
             psi = np.concatenate((self.mu_hats[-1], self.thetas[-1]))
             samples = self.deploy_sample()
             mu_hat = self.mu_hats[-1]
-            d1, d2 = self.estimate_partials(psi, mu_hat, t)
-            dmu_star = self.estimateLTJac(d1, d2)
-            grad, loss = self.estimateLTGrad(samples, theta, mu_hat, dmu_star)
-            losses.append(loss)
 
-            # estimation noise: optional
-            noise = 0   # np.random.normal(loc=0, scale=1, size=grad.shape)
-            theta = self.thetas[-1] - lr * (grad + noise)
+            if t >= self.H:
+                d1, d2 = self.estimate_partials(psi, mu_hat, t)
+                dmu_star = self.estimateLTJac(d1, d2)
+                grad, loss = self.estimateLTGrad(samples, theta, mu_hat, dmu_star)
+                losses.append(loss)
+
+                # estimation noise: optional
+                noise = 0   # np.random.normal(loc=0, scale=1, size=grad.shape)
+                theta = self.thetas[-1] - lr * (grad + noise)
             self.thetas.append(theta)
         return losses
     
     def plot_mus(self):
         plt.plot(self.mu_hats)
+        plt.xlabel('Timestep')
+        plt.ylabel('Predicted Mean')
+        plt.title('Simulation Predicted Means')
         plt.show()
 
 
@@ -151,19 +159,24 @@ def fn1(k, samples, mus, sigmas):
     mus = mus + (mus * acceptance_rate * .1)
     return mus, sigmas
 
-arr = np.array([1])
-pop1 = SubPopulation(arr, arr, partial(fn1, 0))
-pop2 = SubPopulation(arr, arr, partial(fn1, 0.5))
-world = MeanWorld([pop1, pop2], 50, [.5, .5])
+arr = np.array([1, 1, 1])
+add = np.clip(np.random.normal(), 0, None)
+print(arr + add)
+pop1 = SubPopulation(arr + add, arr, partial(fn1, 0))
+pop2 = SubPopulation(arr, arr, partial(fn1, 0))
+world = MeanWorld([pop1, pop2], 100, [.5, .5])
 
 # init simulation, Horizon = 1
-theta_init = np.random.normal(size=(1,))
-theta_star = np.random.normal(size=(1,))
-simulation = StatefulPerfGD(world, theta_init, 1, theta_star)
-losses = simulation.spgd(.01, 100)
+theta_init = np.random.normal(size=(3,))
+theta_star = np.random.normal(size=(3,))
+simulation = StatefulPerfGD(world, theta_init, 6, theta_star)
+losses = simulation.spgd(.001, 100)
 
 # plot
 plt.plot(losses)
+plt.xlabel('Timestep')
+plt.ylabel('Loss')
+plt.title('Cross Entropy Loss')
 plt.show()
 simulation.plot_mus()
 
